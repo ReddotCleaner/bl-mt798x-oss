@@ -25,6 +25,22 @@
 		};
 	};
 
+	mtd-layout {
+		layout@0 {
+			label = "default";
+			/* 256M flash（硬改扩容）: ubi = 250.5MB = 0xFA80000，FIT 路线不用 NMBM，可顶满 */
+			mtdids = "spi-nand0=spi-nand0";
+			mtdparts = "spi-nand0:1024k(bl2),512k(u-boot-env),2048k(factory),2048k(fip),256512k(ubi)";
+		};
+
+		layout@1 {
+			label = "114m";
+			/* 原厂 128M 布局: ubi = 114MB，对应官方/ImmortalWrt 原版 ITB */
+			mtdids = "spi-nand0=spi-nand0";
+			mtdparts = "spi-nand0:1024k(bl2),512k(u-boot-env),2048k(factory),2048k(fip),116736k(ubi)";
+		};
+	};
+
 	gpio-keys {
 		compatible = "gpio-keys";
 

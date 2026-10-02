@@ -1,7 +1,9 @@
 name: Build BL2 and FIP
 
 on:
-  push:
+  # 上游原为 on: push（每次推送自动矩阵编译全部板子）；
+  # 本仓库改成手动触发，避免与 build-rax3000m-256m.yml 重复编译。
+  workflow_dispatch:
 
 jobs:
   generate_list:

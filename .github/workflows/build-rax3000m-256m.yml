@@ -1,0 +1,106 @@
+# RAX3000M NAND（SPI-NAND）专用 · FIT/ITB 路线 · 双布局 U-Boot
+# 来源：1715173329/bl-mt798x-oss 的 fit-example 分支（hanwckf/bl-mt798x 的 FIT 改造版，uboot-mtk-20220606）
+# 本仓库额外加入多布局配置：default = 256M(250.5MB ubi) / 114m = 原厂 128M(114MB ubi)
+name: Build RAX3000M FIT U-Boot (multi-layout 256M/114M)
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: '编译完成后发布 GitHub Release（true/false）'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y gcc-aarch64-linux-gnu build-essential flex bison libssl-dev device-tree-compiler qemu-user-static
+
+      - name: 自检（布局表 / defconfig，防止静默编出废件）
+        run: |
+          set -e
+          echo "===== mtd-layout 节点 ====="
+          grep -n -A18 'mtd-layout' uboot-mtk-20220606/arch/arm/dts/mt7981-cmcc-rax3000m.dts
+          grep -q '256512k(ubi)' uboot-mtk-20220606/arch/arm/dts/mt7981-cmcc-rax3000m.dts || { echo "ERROR: 缺 256512k(ubi) 布局"; exit 1; }
+          grep -q '116736k(ubi)' uboot-mtk-20220606/arch/arm/dts/mt7981-cmcc-rax3000m.dts || { echo "ERROR: 缺 116736k(ubi) 布局"; exit 1; }
+          echo "===== defconfig 关键项 ====="
+          grep -nE 'MEDIATEK_MULTI_MTD_LAYOUT|CMD_SHOW_MTD_LAYOUT|MTDPARTS_DEFAULT|NMBM|ENV_IS_IN_UBI|ENV_UBI_VOLUME|WEBUI_FAILSAFE' uboot-mtk-20220606/configs/mt7981_cmcc_rax3000m_multi_layout_defconfig
+
+      - name: Build BL2 + FIP (mt7981 / cmcc_rax3000m / multi-layout)
+        env:
+          SOC: mt7981
+          BOARD: cmcc_rax3000m
+          MULTI_LAYOUT: '1'
+        run: |
+          ./build.sh 2>&1 | tee build.log
+          mkdir -p output
+          cp -f build.log output/
+          sha256sum output/* > output/sha256sums
+          ls -l output/
+
+      - name: 校验产物（FIP 内是否真的含两张布局表）
+        run: |
+          set -e
+          FIP=$(ls output/*fip*.bin | head -1)
+          echo "FIP = $FIP"
+          strings -n 4 "$FIP" | grep -E '256512k\(ubi\)|116736k\(ubi\)' || { echo "ERROR: FIP 里找不到布局字符串"; exit 1; }
+          ls -l output/*bl2*.bin 2>/dev/null || echo "（本次 ATF 配置未产出 bl2）"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rax3000m-fit-uboot-multilayout
+          path: output/*
+          retention-days: 90
+
+      - name: Publish release
+        if: ${{ github.event.inputs.make_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="rax3000m-uboot-multilayout-$(date -u +%Y%m%d-%H%M)"
+          FIP=$(basename "$(ls output/*fip*.bin | head -1)")
+          BL2=$(ls output/*bl2*.bin 2>/dev/null | head -1 || true)
+          BL2NOTE=""
+          if [ -n "$BL2" ]; then BL2NOTE=" 与 $(basename "$BL2")（BL2/preloader，刷到 BL2 分区，可选）"; fi
+          {
+            echo "## RAX3000M NAND（SPI-NAND）专用 U-Boot · FIT 路线 · 双布局"
+            echo
+            echo "> **EMMC 版机器不要用！** 仅限 RAX3000M / RAX3000Me 的 SPI-NAND 版。"
+            echo "> 未硬改扩容（原厂 128M）的机器可以用，但必须先切到 114m 布局。"
+            echo
+            echo "源码：\`1715173329/bl-mt798x-oss\` 的 \`fit-example\` 分支（基于 hanwckf bl-mt798x，uboot-mtk-20220606），"
+            echo "本仓库额外加了多布局配置。"
+            echo
+            echo "| 布局名 | ubi 分区 | 适用固件 |"
+            echo "|--------|----------|----------|"
+            echo "| \`default\` | 256512k = **250.5MB** | **256M 硬改机**：ImmortalWrt 25.12 ITB（DTS ubi = 0xFA80000）|"
+            echo "| \`114m\` | 116736k = **114MB** | 原厂 128M 机 / 官方原版 ITB（ubi = 0x7200000）|"
+            echo
+            echo "产物：\`$FIP\`（BL31+U-Boot，写 **FIP 分区**）$BL2NOTE"
+            echo
+            echo "### 刷入步骤"
+            echo "1. **先备份**：\`nanddump -f factory.bin /dev/mtd2\`（factory 分区 = MAC/EEPROM）以及 \`u-boot-env\`"
+            echo "2. 在现役系统里 \`mtd write <fip> FIP\`（或进现役 U-Boot 的 Web 页上传 FIP）；BL2 通常不用换（现役已是免签 BL2）"
+            echo "3. 捅 reset 5 秒进新 U-Boot 的 web failsafe → \`192.168.1.1\`（自动 DHCP；不自动重启属正常，等几分钟手动断电）"
+            echo "4. 页面里**选布局**（256M 机器选 \`default\`）→ 上传与该布局匹配的 \`.itb\` 固件（传 \`squashfs-sysupgrade.itb\`）"
+            echo
+            echo "### 注意"
+            echo "- 切换布局会**重建 ubi**：配置与已装插件全部丢失；**不要**跨布局用 sysupgrade 直接升，要先在 U-Boot 里切布局再刷整包"
+            echo "- 该 U-Boot 只引导**主线 OpenWrt/ImmortalWrt 的 FIT(.itb)** 固件，不兼容基于 MTK SDK 的 \`.bin\` 固件（那条路线需要 NMBM 版 U-Boot）"
+          } > NOTES.md
+          cat NOTES.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file NOTES.md output/*
